@@ -9,16 +9,18 @@ import h5py
 
 
 class DataLoader:
-	def __init__(self, dialog_loc, image_loc, param_loc):
+	def __init__(self, dialog_loc, image_loc, param_loc, cnn_loc):
 		self.dialog_loc = dialog_loc
 		self.image_loc = image_loc
 		self.param_loc = param_loc
+		self.cnn_loc = cnn_loc
 		self.dialog = h5py.File(dialog_loc, 'r')
 		self.imageAll = h5py.File(image_loc, 'r')
+		self.cnnFeatures = h5py.File(cnn_loc, 'r')
 		with open(param_loc, 'rb') as input_json:
 			self.params = json.loads(input_json.read().decode('utf-8'))
 		self.processData()
-
+		
 	def getCNNOutputs(self):
 		all_images = {'train' : {}, 'val' : {}}
 		cnn_features = []
@@ -53,10 +55,10 @@ class DataLoader:
 		self.ind2word = self.params['ind2word']
 		self.ind2word = {int(key): value for key,value in self.ind2word.items()}
 		self.word2ind = self.params['word2ind']
-
+	
 		#Add tokens
 		self.START_TOKEN = '<START>'
-		self.END_TOKEN = '<END>'
+		self.END_TOKEN = '<END>' 
 		self.PAD_TOKEN = '<PAD>'
 		self.START_INDEX = len(self.ind2word.keys()) + 1
 		self.END_INDEX = len(self.ind2word.keys()) + 2
@@ -110,6 +112,7 @@ class DataLoader:
 	def processImage(self, normalize):
 		self.images = {}
 		self.image_pos = {}
+		self.cnn_features = {}
 		for dataset in ['train','val','test']:
 			if normalize:
 				self.images[dataset] = np.array(self.imageAll['images_'+dataset]) / (np.sqrt(np.sum(np.square(self.imageAll['images_'+dataset]), 1)))[:,None]
@@ -119,20 +122,23 @@ class DataLoader:
 		for dataset in ['train','val','test']:
 			self.image_pos[dataset] = np.array(self.dialog['img_pos_'+dataset])
 
+		for dataset in ['train','val','test']:
+			self.cnn_features[dataset] = self.cnnFeatures['img_'+dataset]
+
 	def processHistory(self, maxHistoryLen=60):
 		self.history = {}
 		self.history_length = {}
-
+		
 		for dataset in ['train', 'val', 'test']:
 			self.history[dataset] = np.zeros((self.datasize[dataset], self.dialogLength, self.questionLength+self.answerLength), dtype=np.int64)
 			self.history_length[dataset] = np.zeros((self.datasize[dataset], self.dialogLength), dtype=np.int64)
-
+			
 			for example in range(self.datasize[dataset]):
 				#First round has caption as history
 				captionLength = min(self.captions_length[dataset][example], self.questionLength+self.answerLength)
 				self.history[dataset][example, 0, :captionLength] = self.captions[dataset][example, :captionLength]
 				self.history_length[dataset][example, 0] = captionLength
-
+				
 				#Other Rounds have previous Q + A
 				for turn in range(self.dialogLength-1):
 					lenQ = self.questions_length[dataset][example, turn]
@@ -176,7 +182,7 @@ class DataLoader:
 
 				self.options_output[dataset][example, :optionLength] = self.options_list[dataset][example, :optionLength]
 				self.options_output[dataset][example, optionLength] = self.END_INDEX
-
+				
 			self.appended_options_length[dataset] = self.options_length[dataset] + 1
 
 
@@ -213,25 +219,28 @@ class DataLoader:
 			batch['history'] = self.history[dataset][indexes,:,:batch_max_history_length]
 
 		batch['images'] = self.images[dataset][self.image_pos[dataset][indexes],:]
+		batch['cnn_features'] = np.zeros((len(indexes), self.cnn_features[dataset].shape[1], self.cnn_features[dataset].shape[2], self.cnn_features[dataset].shape[3]))
+		for index, i in enumerate(indexes):
+			batch['cnn_features'][index, :, :, :] = self.cnn_features[dataset][i, :, :, :]
 
 		batch['answers_length'] = self.appended_answers_length[dataset][indexes,:]
 		batch_max_answer_length = np.max(batch['answers_length'])
 		batch['answers_input'] = self.answers_input[dataset][indexes,:,:batch_max_answer_length]
 		batch['answers_output'] = self.answers_output[dataset][indexes,:,:batch_max_answer_length]
 		batch['answers_indexes'] = self.answers_indexes[dataset][indexes,:]
-
+		
 		if dataset == 'test' or dataset == 'val':
 			batch['options_indexes_array'] = self.options[dataset][indexes,:,:]
 			batch['options_indexes'] = np.reshape(batch['options_indexes_array'], (-1,))
 			batch['options_length'] = self.appended_options_length[dataset][batch['options_indexes']]
 			batch_max_option_length = np.max(batch['options_length'])
 			batch['options_input'] = self.options_input[dataset][batch['options_indexes'],:batch_max_option_length]
-			batch['options_output'] = self.options_output[dataset][batch['options_indexes'],:batch_max_option_length]
+			batch['options_output'] = self.options_output[dataset][batch['options_indexes'],:batch_max_option_length]	
 			batch['options_length'] = np.reshape(batch['options_length'], (batch['options_indexes_array'].shape[0], batch['options_indexes_array'].shape[1], batch['options_indexes_array'].shape[2]))
 			batch['options_input'] = np.reshape(batch['options_input'], (batch['options_indexes_array'].shape[0], batch['options_indexes_array'].shape[1], batch['options_indexes_array'].shape[2], -1))
 			batch['options_output'] = np.reshape(batch['options_output'], (batch['options_indexes_array'].shape[0], batch['options_indexes_array'].shape[1], batch['options_indexes_array'].shape[2], -1))
 		return batch
-
+	
 
 	def rightAlignAll(self):
 		self.isRightAligned = True
